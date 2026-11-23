@@ -152,10 +152,51 @@ class RandomSparseAttention(SparseAttentionBase):
         return self.forward_attention(x,mask=mask)
 
 
-model=RandomSparseAttention(embed_dim=64,num_heads=4,random_connections=3)
-x=torch.randn(2,8,64)
-y=model(x)
+
+class BlockSparseAttention(SparseAttentionBase):
+    def __init__(self,embed_dim,num_heads,block_size=2,block_radius=1,dropout=0):
+        super().__init__(embed_dim,num_heads,dropout)
+        self.block_size=block_size
+        self.block_radius=block_radius
+
+    def create_mask(self,N,device):
+        if N%self.block_size !=0:
+            raise ValueError("Sequence Length must be divisiable by block size")
+
+        num_blocks=N//self.block_size
+        block_position=torch.arange(num_blocks,device=device)
+        block_distence=(block_position[:,None]-block_position[None,:]).abs()
+        block_mask=(block_distence<=self.block_radius)
+        mask=block_mask.repeat_interleave(self.block_size,dim=0).repeat_interleave(self.block_size,dim=1)
+
+        return mask
+
+    def forward(self,x):
+        B,N,D=x.shape
+        mask=self.create_mask(N,device=x.device)
+        return self.forward_attention(x,mask)
+
+
+
+
+model = BlockSparseAttention(
+    embed_dim=64,
+    num_heads=4,
+    block_size=2,
+    block_radius=1
+)
+
+x = torch.randn(2, 8, 64)
+
+y = model(x)
+
 print(y.shape)
+
+
+# model=RandomSparseAttention(embed_dim=64,num_heads=4,random_connections=3)
+# x=torch.randn(2,8,64)
+# y=model(x)
+# print(y.shape)
 
 
 

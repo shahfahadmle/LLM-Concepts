@@ -12,7 +12,7 @@ class SparseAttentionBase(nn.Module):
         self.num_heads=num_heads
         self.heads_dim=embed_dim//num_heads
         self.qkv=nn.Linear(embed_dim,3*embed_dim)
-        self.output=nn.Linear(embed_dim,embed_dim)
+        self.output_proj=nn.Linear(embed_dim,embed_dim)
     def project_qkv(self,x):
         B,T,D=x.shape
         qkv=self.qkv(x)
@@ -44,7 +44,7 @@ class SparseAttentionBase(nn.Module):
         weights=F.dropout(weights,p=self.dropout,training=self.training)
         output=weights@V
         output=self.merge_heads(output)
-        return self.output(output)
+        return self.output_proj(output)
 
 class LocalSparseAttention(SparseAttentionBase):
     def __init__(self,embed_dim,num_heads,radius,dropout=0.0):
@@ -177,20 +177,88 @@ class BlockSparseAttention(SparseAttentionBase):
         return self.forward_attention(x,mask)
 
 
+class TopKSparseAttention(SparseAttentionBase):
+    def __init__(self,embed_dim,num_heads,topk=3,dropout=0.0,casual=None):
+        super().__init__(embed_dim,num_heads,dropout)
+        self.casual=casual
+        self.topk=topk
+    def forward(self,x):
+        Q,K,V=self.project_qkv(x)
+        B,H,N,Dh=Q.shape
+        scores=Q@K.transpose(-2,-1)
+        scores=scores/(Dh**0.5)
+        if self.casual:
+            casual_mask=torch.triu(torch.ones(N,N,dtype=torch.bool,device=x.device))
+            scores=scores.masked_fill(~casual_mask[None,None,:,:],float('-inf'))
+        k=min(self.topk,N)
+        values,indicies=torch.topk(scores,k=k,dim=-1)
+        sparse_scores=torch.full_like(scores,float('-inf'))
+        sparse_scores.scatter_(-1,indicies,values)
+        weights=F.softmax(sparse_scores,dim=-1)
+        weights=F.dropout(weights,p=self.dropout,training=self.training)
+        context=weights@V
+        output=self.merge_heads(context)
+
+        return self.output_proj(output)
 
 
-model = BlockSparseAttention(
-    embed_dim=64,
-    num_heads=4,
-    block_size=2,
-    block_radius=1
-)
+class HybridSparseAttention(SparseAttentionBase):
+    def __init__(self,embed_dim,num_heads,radius,global_tokens,,random_connection,casual=None,dropout=0.0):
+        super().__init__(embed_dim,num_heads,dropout)
+        self.radius=radius
+        self.global_token=(global_tokens if global_tokens is not None else [0])
 
-x = torch.randn(2, 8, 64)
+        self.random_connections=random_connections
+        self.casual=casual
+    def create_msak(self,N,device):
+        positions=torch.arrange(N,device=device)
+        dist=(positions[:,None]-positions[None,:]).abs()
+        mask=dist<=slef.radius
 
-y = model(x)
+        for g in global_tokens:
+            if not 0<=g <N:
+                raise ValueError("invalid global tokens")
+            mask[g,:]=True
+            mask[:,g]=True
+        
+        for i in range(N):
+            condidates=torch.arrange(N,device=device)
+            if self.casual:
+                condidates=condidates[condidates<=i]
+            condidates=condidates[condidates!=i]
 
-print(y.shape)
+
+
+
+
+# model = TopKSparseAttention(
+#     embed_dim=64,
+#     num_heads=4,
+#     topk=2,
+#     casual=True
+# )
+
+# x = torch.randn(2, 8, 64)
+
+# y = model(x)
+
+# print(y.shape)
+# print(y)
+
+
+
+# model = BlockSparseAttention(
+#     embed_dim=64,
+#     num_heads=4,
+#     block_size=2,
+#     block_radius=1
+# )
+
+# x = torch.randn(2, 8, 64)
+
+# y = model(x)
+
+# print(y.shape)
 
 
 # model=RandomSparseAttention(embed_dim=64,num_heads=4,random_connections=3)
@@ -255,3 +323,64 @@ print(y.shape)
 
 # print(y.shape)
 # # torch.Size([2, 8, 64])
+
+
+B = 2
+N = 8
+D = 64
+H = 4
+
+x = torch.randn(B, N, D)
+
+models = {
+
+    "Local": LocalSparseAttention(
+        D, H, radius=1
+    ),
+
+    "Causal Local": CausalSparseAttention(
+        D, H, window_size=3
+    ),
+
+    "Global": GlobalSparseAttention(
+        D, H, global_tokens=[0]
+    ),
+
+    "Strided": StridedSparseAttention(
+        D, H, stride=2
+    ),
+
+    "Random": RandomSparseAttention(
+        D, H, random_connections=2
+    ),
+
+    "Block": BlockSparseAttention(
+        D, H, block_size=2
+    ),
+
+    "Top-K": TopKSparseAttention(
+        D, H, top_k=3
+    ),
+
+    "Hybrid": HybridSparseAttention(
+        D, H,
+        radius=1,
+        global_tokens=[0],
+        random_connections=2,
+        causal=True
+    )
+}
+
+for name, model in models.items():
+
+    model.eval()
+
+    with torch.no_grad():
+
+        output = model(x)
+
+    print(
+        f"{name:15} "
+        f"Input: {tuple(x.shape)} "
+        f"Output: {tuple(output.shape)}"
+    )
